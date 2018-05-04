@@ -86,7 +86,8 @@ def funcs(Rp,rs):
   res = {'funcf':s1,'funcg':s2}
   return res
 # one halo term-------------------------------------
-def nfwesd(Mh,c,z,Rp):
+def nfwesd(theta,z,Rp):
+  Mh,c      = theta
   efunc     = 1.0/np.sqrt(omega_m*(1.0+z)**3+\
               omega_l*(1.0+z)**(3*(1.0+w))+\
               omega_k*(1.0+z)**2)
@@ -143,7 +144,30 @@ def twohaloesd(Mh,rr,xi,Rp):
       esd[i]   = (4.0*SigRR[i]/Rp[i]/Rp[i]-SigR[i])*omega_m*h
   return esd
 #---PART III: likelihood for mcmc----
+def lnprior(theta):
+  logM,con= theta
+  if 12.0<logM<20.0 and 1.0<con<16.0:
+      return 0.0
+  return -np.inf
+#---------------------------------------------
+def lnlike(theta,z,Rp,esd,err):
+  logM,con = theta
+  #stellar  = M0/2.0/pi/r/r
+  nrr      = len(Rp)
+  #stars    = stellar[0:nrr]
 
+  struct= nfwesd(theta,z,Rp)
+  #model = stars+struct["res"]
+  model = struct["res"]
+  invers= 1.0/err/err
+  diff  = -0.5*((esd-model)**2*invers-np.log(invers))
+  return diff.sum()
+#---------------------------------------------------
+def lnprob(theta,Rp,esd,err,z):
+  lp = lnprior(theta)
+  if not np.isfinite(lp):
+        return -np.inf
+  return lp+lnlike(theta,Rp,esd,err,z)
 
 #---END of functions----------------
 #---PART IV: MAIN function---------
@@ -178,26 +202,45 @@ def main():
       RR   = data[0,:]
       ESDR = data[1,:]
       ESDRR= data[2,:]
-      finterp3 = interp1d(RR,ESDR)
-      finterp4 = interp1d(RR,ESDRR)
-      esdfunc3 = np.array(finterp3(Rp[3:5]))
-      esdfunc4 = np.array(finterp4(Rp[3:5]))
-      onehesd  = nfwesd(15.5,5,0.1,Rp)
-      bias     = galaxybias(15.5)
-      twohesd  = np.zeros(len(esd))
-      twohesd[3:5] = omega_m*h*(esdfunc4-esdfunc3)
-   print bias           
-   plt.errorbar(Rp,esd,yerr=err,fmt='k.',ms=10,elinewidth=3)
-   plt.plot(Rp,onehesd,'k-.',linewidth=3)
-   plt.plot(Rp,bias*twohesd,'k--',linewidth=3)
-   plt.plot(Rp,onehesd+bias*twohesd,'k-',linewidth=3)
-   plt.xlabel('Rp')
-   plt.ylabel('esd')
-   plt.ylim(5.,1000.)
-   plt.xlim(0.05,4.)
-   plt.yscale('log')
-   plt.xscale('log')
-   plt.show()
+      logM = 15.0
+      con  = 4.0
+      zl   = 0.07
+      pars = np.array([logM,con])
+
+      ndim,nwalkers = 2,200
+      pos = [pars+1e-4*np.random.randn(ndim) for i in range(nwalkers)]
+      sampler = emcee.EnsembleSampler(nwalkers,ndim,lnprob,args=(Rp,esd,err,zl))
+	        sampler.run_mcmc(pos,3000)
+
+      burnin = 100
+      samples=sampler.chain[:,burnin:,:].reshape((-1,ndim))
+      Mh,cn= map(lambda v: (v[1],v[2]-v[1],v[1]-v[0]),zip(*np.percentile(samples,[16,50,84],axis=0)))
+      fig = corner.corner(samples,labels=["logM","c"],\
+          truths=[Mh[0],cn[0]])
+      plt.show()
+      plt.savefig('mcmc_8.eps')
+
+      #finterp3 = interp1d(RR,ESDR)
+      #finterp4 = interp1d(RR,ESDRR)
+      #esdfunc3 = np.array(finterp3(Rp[3:5]))
+      #esdfunc4 = np.array(finterp4(Rp[3:5]))
+      #onehesd  = nfwesd(15.5,5,0.1,Rp)
+      #bias     = galaxybias(15.5)
+      #twohesd  = np.zeros(len(esd))
+      #twohesd[3:5] = omega_m*h*(esdfunc4-esdfunc3)
+#   print bias           
+#   plt.errorbar(Rp,esd,yerr=err,fmt='k.',ms=10,elinewidth=3)
+#   plt.plot(Rp,onehesd,'k-.',linewidth=3)
+#   plt.plot(Rp,bias*twohesd,'k--',linewidth=3)
+#   plt.plot(Rp,onehesd+bias*twohesd,'k-',linewidth=3)
+#   plt.xlabel('Rp')
+#   plt.ylabel('esd')
+#   plt.ylim(5.,1000.)
+#   plt.xlim(0.05,4.)
+#   plt.yscale('log')
+#   plt.xscale('log')
+#   plt.show()
+
 if __name__=='__main__':
    main()
 
