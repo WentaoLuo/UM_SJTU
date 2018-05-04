@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 import gglens
 import camb
 from camb import model, initialpower
-import emcee as mcham
+import emcee 
+import corner
 from scipy.interpolate import interp1d
 from scipy import integrate
 from optparse import OptionParser
@@ -146,19 +147,17 @@ def twohaloesd(Mh,rr,xi,Rp):
 #---PART III: likelihood for mcmc----
 def lnprior(theta):
   logM,con= theta
-  if 12.0<logM<20.0 and 1.0<con<16.0:
+  if 11.0<logM<20.0 and 0.0<con<20.0:
       return 0.0
   return -np.inf
 #---------------------------------------------
-def lnlike(theta,z,Rp,esd,err):
+def lnlike(theta,Rp,esd,err,z):
   logM,con = theta
   #stellar  = M0/2.0/pi/r/r
   nrr      = len(Rp)
   #stars    = stellar[0:nrr]
 
-  struct= nfwesd(theta,z,Rp)
-  #model = stars+struct["res"]
-  model = struct["res"]
+  model= nfwesd(theta,z,Rp)
   invers= 1.0/err/err
   diff  = -0.5*((esd-model)**2*invers-np.log(invers))
   return diff.sum()
@@ -168,7 +167,6 @@ def lnprob(theta,Rp,esd,err,z):
   if not np.isfinite(lp):
         return -np.inf
   return lp+lnlike(theta,Rp,esd,err,z)
-
 #---END of functions----------------
 #---PART IV: MAIN function---------
 def main():
@@ -179,8 +177,8 @@ def main():
    (o,args)   = parser.parse_args()
    cosmology  = [100,0.022,0.122]
 
-   redshift = 0.1
-   data     = np.loadtxt('shear_umsjtu_richd_3',unpack=True) 
+   redshift = 0.0787
+   data     = np.loadtxt('shear_umsjtu_richa_3',unpack=True) 
    
    Rp       = data[0,:]
    esd      = data[1,:]
@@ -202,29 +200,41 @@ def main():
       RR   = data[0,:]
       ESDR = data[1,:]
       ESDRR= data[2,:]
-      logM = 15.0
+      logM = 13.9
       con  = 4.0
-      zl   = 0.07
+      zl   = 0.0787
       pars = np.array([logM,con])
 
       ndim,nwalkers = 2,200
       pos = [pars+1e-4*np.random.randn(ndim) for i in range(nwalkers)]
       sampler = emcee.EnsembleSampler(nwalkers,ndim,lnprob,args=(Rp,esd,err,zl))
-	        sampler.run_mcmc(pos,3000)
+      sampler.run_mcmc(pos,2000)
 
       burnin = 100
       samples=sampler.chain[:,burnin:,:].reshape((-1,ndim))
       Mh,cn= map(lambda v: (v[1],v[2]-v[1],v[1]-v[0]),zip(*np.percentile(samples,[16,50,84],axis=0)))
+      print 'Halo Mass:    ',Mh
+      print 'concentration:',cn
       fig = corner.corner(samples,labels=["logM","c"],\
-          truths=[Mh[0],cn[0]])
+          truths=[Mh[0],cn[0]],color="b",\
+	  plot_datapoints=False,plot_density=True)
+      plt.savefig('mcmc_richd.eps')
       plt.show()
-      plt.savefig('mcmc_8.eps')
 
       #finterp3 = interp1d(RR,ESDR)
       #finterp4 = interp1d(RR,ESDRR)
       #esdfunc3 = np.array(finterp3(Rp[3:5]))
       #esdfunc4 = np.array(finterp4(Rp[3:5]))
-      #onehesd  = nfwesd(15.5,5,0.1,Rp)
+      onehesd  = nfwesd([Mh[0],cn[0]],0.07,Rp)
+      plt.errorbar(Rp,esd,yerr=err,fmt='k.',ms=20,elinewidth=3)
+      plt.plot(Rp,onehesd,'k-',linewidth=3)
+      plt.xlabel('Rp')
+      plt.ylabel('esd')
+      plt.ylim(1.,600.)
+      plt.xlim(0.05,4.)
+      plt.yscale('log')
+      plt.xscale('log')
+      plt.show()
       #bias     = galaxybias(15.5)
       #twohesd  = np.zeros(len(esd))
       #twohesd[3:5] = omega_m*h*(esdfunc4-esdfunc3)
