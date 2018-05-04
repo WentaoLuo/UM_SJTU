@@ -6,7 +6,9 @@ import gglens
 import camb
 from camb import model, initialpower
 import emcee as mcham
-
+from scipy.interpolate import interp1d
+from scipy import integrate
+from optparse import OptionParser
 
 #This code is to modelling GGlensing signal
 # using NFW and two point correlation functions.
@@ -40,11 +42,11 @@ def matterpower(redshift,cosmology):
   kh,zl,pk= results.get_matter_power_spectrum(minkh=1e-4,maxkh=1000,npoints=10000)
   s8      = np.array(results.get_sigma8())
 #Non-Linear spectra(Halofit)
-#  pars.NonLinear = model.NonLinear_both
-#  results.calc_power_spectra(pars)
-#  kh_nonlin,z_nonlin,pk_nonlin=results.get_matter_power_spectrum(minkh=1e-4,maxkh=1000,npoints=10000)
+  pars.NonLinear = model.NonLinear_both
+  results.calc_power_spectra(pars)
+  kh_nonlin,z_nonlin,pk_nonlin=results.get_matter_power_spectrum(minkh=1e-4,maxkh=1000,npoints=10000)
 
-  return {'kh':kh_nonlin,'linpw':pk}
+  return {'kh':kh,'linpw':pk,'nonpw':pk_nonlin}
 
 def ps2xi(kh,power,rr): 
   xi  = np.zeros(len(rr)) 
@@ -108,27 +110,37 @@ def nfwesd(Mh,c,z,Rp):
   return esd
 
 # two halo term----------------------------------------
-def galaxybias(logM,xi):
+def galaxybias(logM):
   Mnl = 8.73*10e+12
   Mh  = 10.0**logM
   xx  = Mh/Mnl
   b0  = 0.53+0.39*xx**0.45+(0.13/(40.0*xx+1.0))\
         +5.0*0.0004*xx**1.5
   bias= b0+\
-        np.log10(xx)*(0.4*(omega_m-0.3+ns-1)+\
+        np.log10(xx)*(0.4*(omega_m-0.3+nps-1)+\
         0.3*(sigma8-0.9+h-0.7)+0.8*alphas)
-  eta = (1.0+1.17*xi)**(1.49)/(1.0+0.69*xi)**(2.09)
-  return bias*eta
-
-def Sigmafunc(rr,xi,Rp):
-  for i in range(Rp): 
-  return res
+  return bias
 
 def twohaloesd(Mh,rr,xi,Rp):
-  bias = galaxybias(Mh,xi)
+  bias = galaxybias(Mh)
   corr = bias*xi
-  esd  = np.zeros(len(Rp))
+  eta = (1.0+1.17*xi)**1.49/(1.0+0.69*xi)**2.09
+  finterp1 = interp1d(rr,xi)
+  finterp2 = interp1d(rr,eta)
 
+  nr       = len(Rp)
+  SigR     = np.zeros(nr)
+  SigRR    = np.zeros(nr)
+  warnings.simplefilter("ignore")
+  esd  = np.zeros(len(nr))
+  for i in range(nr):
+      funcR    = lambda x:finterp1(x)*finterp2(x)*x/np.sqrt(x*x-Rp[i]*Rp[i])
+      SigR[i],err= integrate.quad(funcR,Rp[i],100.0)
+      funcRR   = lambda x,y:y*finterp1(x)*finterp2(x)*x/np.sqrt(x*x-y*y)
+      glim     = lambda z:z
+      hlim     = lambda z:100.0
+      SigRR[i],err = integrate.dblquad(funcRR,np.min(rr),Rp[i],glim,hlim)
+      esd[i]   = (4.0*SigRR[i]/Rp[i]/Rp[i]-SigR[i])*omega_m*h
   return esd
 #---PART III: likelihood for mcmc----
 
@@ -136,26 +148,53 @@ def twohaloesd(Mh,rr,xi,Rp):
 #---END of functions----------------
 #---PART IV: MAIN function---------
 def main():
-   cosmology=[100,0.022,0.122]
+   parser     = OptionParser()
+   parser.add_option("--MODE",dest="MODE",default="EASY",
+          help="EASY or HARD",metavar="value",
+          type="string")
+   (o,args)   = parser.parse_args()
+   cosmology  = [100,0.022,0.122]
+
    redshift = 0.1
+   data     = np.loadtxt('shear_umsjtu_richd_3',unpack=True) 
+   
+   Rp       = data[0,:]
+   esd      = data[1,:]
+   err      = data[2,:]
 
-   results  = matterpower(redshift,cosmology)
-   kh       = results["kh"]
-   lpower   = results["linpw"]
+   if o.MODE=='HARD':
+      results  = matterpower(redshift,cosmology)
+      kh       = results["kh"]
+      lpower   = results["nonpw"]
+      rr       = np.linspace(0.001,100,500)
+      xi       = ps2xi(kh,lpower[1,:],rr)
+      #onehesd  = nfwesd(14.0,4,0.1,Rp)
+      for i in range(len(rr)):
+	      print rr[i],xi[i]
+      #twohesd  = twohaloesd(Mh,rr,xi,Rp)
 
-   rr       = np.linspace(0.1,200,10000)
-   xi       = ps2xi(kh,lpower[1,:],rr)
-   Rp       = np.linspace(0.1,5.0,100)
-   onehesd  = nfwesd(14.0,4,0.1,Rp)
-   #twohesd  = twohaloesd(rr,xi,Rp)
-   #plt.plot(kh,mpower[0,:],'r-')
-   #plt.plot(kh,mpower[1,:],'r--')
-   #plt.plot(kh,lpower[0,:],'k-')
-   #plt.plot(kh,lpower[1,:],'k--')
-   #plt.plot(rr,rr*rr*xi,'k-',linewidth=3)
-   plt.plot(Rp,esd,'k-',linewidth=3)
+   if o.MODE=='EASY':
+      data= np.loadtxt('corr_linear',unpack=True,skiprows=2)
+      RR   = data[0,:]
+      ESDR = data[1,:]
+      ESDRR= data[2,:]
+      finterp3 = interp1d(RR,ESDR)
+      finterp4 = interp1d(RR,ESDRR)
+      esdfunc3 = np.array(finterp3(Rp[3:5]))
+      esdfunc4 = np.array(finterp4(Rp[3:5]))
+      onehesd  = nfwesd(15.5,5,0.1,Rp)
+      bias     = galaxybias(15.5)
+      twohesd  = np.zeros(len(esd))
+      twohesd[3:5] = omega_m*h*(esdfunc4-esdfunc3)
+   print bias           
+   plt.errorbar(Rp,esd,yerr=err,fmt='k.',ms=10,elinewidth=3)
+   plt.plot(Rp,onehesd,'k-.',linewidth=3)
+   plt.plot(Rp,bias*twohesd,'k--',linewidth=3)
+   plt.plot(Rp,onehesd+bias*twohesd,'k-',linewidth=3)
    plt.xlabel('Rp')
    plt.ylabel('esd')
+   plt.ylim(5.,1000.)
+   plt.xlim(0.05,4.)
    plt.yscale('log')
    plt.xscale('log')
    plt.show()
