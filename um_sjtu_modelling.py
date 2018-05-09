@@ -138,7 +138,7 @@ def twohaloesd(Mh,rr,xi,Rp):
   for i in range(nr):
       funcR    = lambda x:finterp1(x)*finterp2(x)*x/np.sqrt(x*x-Rp[i]*Rp[i])
       SigR[i],err= integrate.quad(funcR,Rp[i],100.0)
-      funcRR   = lambda x,y:y*finterp1(x)*finterp2(x)*x/np.sqrt(x*x-y*y)
+      funcRR   = lambda x,y:y*funcR(x)*x/np.sqrt(x*x-y*y)
       glim     = lambda z:z
       hlim     = lambda z:100.0
       SigRR[i],err = integrate.dblquad(funcRR,np.min(rr),Rp[i],glim,hlim)
@@ -151,15 +151,17 @@ def lnprior(theta):
       return 0.0
   return -np.inf
 #---------------------------------------------
-def lnlike(theta,Rp,esd,err,z):
+def lnlike(theta,Rp,esd,covar,z):
   logM,con = theta
   #stellar  = M0/2.0/pi/r/r
   nrr      = len(Rp)
   #stars    = stellar[0:nrr]
 
   model= nfwesd(theta,z,Rp)
-  invers= 1.0/err/err
-  diff  = -0.5*((esd-model)**2*invers-np.log(invers))
+  cov  = np.dot(np.linalg.inv(covar),(model-esd))
+  chi2 = np.dot((model-esd).T,cov)
+  #invers= 1.0/err/err
+  diff  = -0.5*(chi2)
   return diff.sum()
 #---------------------------------------------------
 def lnprob(theta,Rp,esd,err,z):
@@ -177,9 +179,22 @@ def main():
    (o,args)   = parser.parse_args()
    cosmology  = [100,0.022,0.122]
 
-   redshift = 0.0787
-   data     = np.loadtxt('shear_umsjtu_richa_3',unpack=True) 
-   
+   redshift = 0.0789
+   data     = np.loadtxt('shear_richa_mean',unpack=True) 
+   covar    = np.loadtxt('covara',unpack=True) 
+   std      = np.loadtxt('stdricha',unpack=True) 
+   covar[0,0]= covar[0,0]+std[0]*std[0]
+   covar[1,1]= covar[1,1]+std[1]*std[1]
+   covar[2,2]= covar[2,2]+std[2]*std[2]
+   covar[3,3]= covar[3,3]+std[3]*std[3]
+   covar[4,4]= covar[4,4]+std[4]*std[4]
+   correl    = np.zeros((5,5))
+   for i in range(5):
+	   for j in range(5):
+               correl[i,j]=covar[i,j]/np.sqrt(covar[i,i])/np.sqrt(covar[j,j])
+   plt.imshow(correl,interpolation='nearest')
+   plt.colorbar()
+   plt.show()
    Rp       = data[0,:]
    esd      = data[1,:]
    err      = data[2,:]
@@ -200,14 +215,14 @@ def main():
       RR   = data[0,:]
       ESDR = data[1,:]
       ESDRR= data[2,:]
-      logM = 13.9
+      logM = 14.0
       con  = 4.0
-      zl   = 0.0787
+      zl   = 0.0789
       pars = np.array([logM,con])
 
       ndim,nwalkers = 2,200
       pos = [pars+1e-4*np.random.randn(ndim) for i in range(nwalkers)]
-      sampler = emcee.EnsembleSampler(nwalkers,ndim,lnprob,args=(Rp,esd,err,zl))
+      sampler = emcee.EnsembleSampler(nwalkers,ndim,lnprob,args=(Rp,esd,covar,zl))
       sampler.run_mcmc(pos,2000)
 
       burnin = 100
@@ -225,7 +240,7 @@ def main():
       #finterp4 = interp1d(RR,ESDRR)
       #esdfunc3 = np.array(finterp3(Rp[3:5]))
       #esdfunc4 = np.array(finterp4(Rp[3:5]))
-      onehesd  = nfwesd([Mh[0],cn[0]],0.07,Rp)
+      """onehesd  = nfwesd([Mh[0],cn[0]],0.07,Rp)
       plt.errorbar(Rp,esd,yerr=err,fmt='k.',ms=20,elinewidth=3)
       plt.plot(Rp,onehesd,'k-',linewidth=3)
       plt.xlabel('Rp')
@@ -234,7 +249,7 @@ def main():
       plt.xlim(0.05,4.)
       plt.yscale('log')
       plt.xscale('log')
-      plt.show()
+      plt.show()"""
       #bias     = galaxybias(15.5)
       #twohesd  = np.zeros(len(esd))
       #twohesd[3:5] = omega_m*h*(esdfunc4-esdfunc3)
