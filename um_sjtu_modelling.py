@@ -6,19 +6,19 @@ import gglens
 import camb
 from camb import model, initialpower
 import emcee 
-import corner
-from scipy.interpolate import interp1d
+import mcfit
 from scipy import integrate
 from optparse import OptionParser
-
+import warnings
+warnings.filterwarnings('ignore')
 #This code is to modelling GGlensing signal
 # using NFW and two point correlation functions.
 
 # Basic Parameters---------------------------
 h       = 1.0
 w       = -1.0
-omega_m = 0.28
-omega_l = 0.72
+omega_m = 0.315
+omega_l = 0.685
 omega_k = 1.0-omega_m-omega_l
 rho_crt0= 2.78e11                # M_sun Mpc^-3 *h*h 
 rho_bar0= rho_crt0*omega_m       # M_sun Mpc^-3 *h*h
@@ -28,33 +28,46 @@ alphas  = -0.04
 sigma8  = 1.048
 
 #---PART I: generate gglensing for two halo term----
-
-def matterpower(redshift,cosmology):
+def simR(r,rx,corr,Rp):
+  return np.interp(r,rx,corr)*r/np.sqrt(r*r-Rp*Rp)
+def simLR(y,rx,corr,Rp):
+  Rp   = y
+  rSta = y+0.001
+  rEnd = 90.0
+  res  = y*integrate.quad(simR,rSta,rEnd,args=(rx,corr,Rp),epsabs=1e-2)[0]
+  return res
+def matterps2corr2esd(redshift,cosmology):
   z    = redshift
   H_null,Ombh2,Omch2=cosmology
   pars = camb.CAMBparams()
   pars.set_cosmology(H0=H_null,ombh2=Ombh2,omch2=Omch2)
   pars.set_dark_energy()
   pars.InitPower.set_params(ns=nps)
-  pars.set_matter_power(redshifts=[0.,z],kmax=1000.0)
-#Linear spectra
-  pars.NonLinear = model.NonLinear_none
-  results = camb.get_results(pars)
-  kh,zl,pk= results.get_matter_power_spectrum(minkh=1e-4,maxkh=1000,npoints=10000)
-  s8      = np.array(results.get_sigma8())
-#Non-Linear spectra(Halofit)
-  pars.NonLinear = model.NonLinear_both
-  results.calc_power_spectra(pars)
-  kh_nonlin,z_nonlin,pk_nonlin=results.get_matter_power_spectrum(minkh=1e-4,maxkh=1000,npoints=10000)
+  pars.set_matter_power(redshifts=[0.0,z],kmax=2.0)
 
-  return {'kh':kh,'linpw':pk,'nonpw':pk_nonlin}
+  #Linear spectra--------
+  pars.NonLinear=model.NonLinear_none
+  results       =camb.get_results(pars)
+  kh,znon,pk    =results.get_matter_power_spectrum(minkh=1e-4,maxkh=1000.0,npoints=1024)
+  xi            =mcfit.P2xi(kh,l=0)
+  #Calculate corr from PS------
+  nxx   = 50
+  Rmin  = -2.0
+  Rmax  = 2.0
+  rr    = np.logspace(Rmin,Rmax,nxx) 
+  rx,corrfunc   =xi(pk,extrap=True)
+  corr  = np.interp(rr,rx,corrfunc[0,:])
+  #Calculate ESD from corr------
+  nxx   = 10
+  Rp    = np.linspace(0.03,20.,nxx)   
+  ESD   = np.zeros(nxx) 
 
-def ps2xi(kh,power,rr): 
-  xi  = np.zeros(len(rr)) 
-  step= (np.max(kh)-np.min(kh))/len(kh) 
-  for i in range(len(rr)):
-      xi[i] = (step*kh*kh*power*np.sin(kh*rr[i])/(kh*rr[i])).sum()/2.0/np.pi
-  return xi 
+  for i in range(nxx):
+    tmp1     = integrate.quad(simR,Rp[i]+0.001,90.0,args=(rr,corr,Rp[i]),epsabs=1e-4)
+    tmp2     = integrate.quad(simLR,0.001,Rp[i],args=(rr,corr,Rp[i]),epsabs=1e-4)
+    ESD[i]   = (4.0*tmp2[0]/Rp[i]/Rp[i]-2.0*tmp1[0])*omega_m*h  #Luo et al 2017ApJ 836 38L EQ. 39-40
+
+  return {'Rp':Rp,'ESD':ESD}
 
 #---PART II: generate gglensing for one halo term----
 #using NFW profile---- 
@@ -123,52 +136,31 @@ def galaxybias(logM):
         0.3*(sigma8-0.9+h-0.7)+0.8*alphas)
   return bias
 
-def twohaloesd(Mh,rr,xi,Rp):
-  bias = galaxybias(Mh)
-  corr = bias*xi
-  eta = (1.0+1.17*xi)**1.49/(1.0+0.69*xi)**2.09
-  finterp1 = interp1d(rr,xi)
-  finterp2 = interp1d(rr,eta)
-
-  nr       = len(Rp)
-  SigR     = np.zeros(nr)
-  SigRR    = np.zeros(nr)
-  warnings.simplefilter("ignore")
-  esd  = np.zeros(len(nr))
-  for i in range(nr):
-      funcR    = lambda x:finterp1(x)*finterp2(x)*x/np.sqrt(x*x-Rp[i]*Rp[i])
-      SigR[i],err= integrate.quad(funcR,Rp[i],100.0)
-      funcRR   = lambda x,y:y*funcR(x)*x/np.sqrt(x*x-y*y)
-      glim     = lambda z:z
-      hlim     = lambda z:100.0
-      SigRR[i],err = integrate.dblquad(funcRR,np.min(rr),Rp[i],glim,hlim)
-      esd[i]   = (4.0*SigRR[i]/Rp[i]/Rp[i]-SigR[i])*omega_m*h
-  return esd
 #---PART III: likelihood for mcmc----
 def lnprior(theta):
   logM,con= theta
-  if 11.0<logM<20.0 and 0.0<con<20.0:
+  if 11.0<logM<20.0 and 4.0<con<4.5:
       return 0.0
   return -np.inf
 #---------------------------------------------
-def lnlike(theta,Rp,esd,covar,z):
+def lnlike(theta,Rp,esd,esdtwo,covar,z):
   logM,con = theta
   #stellar  = M0/2.0/pi/r/r
   nrr      = len(Rp)
   #stars    = stellar[0:nrr]
-
-  model= nfwesd(theta,z,Rp)
+  bias     = galaxybias(logM)
+  model= nfwesd(theta,z,Rp)+bias*esdtwo
   cov  = np.dot(np.linalg.inv(covar),(model-esd))
   chi2 = np.dot((model-esd).T,cov)
   #invers= 1.0/err/err
   diff  = -0.5*(chi2)
   return diff.sum()
 #---------------------------------------------------
-def lnprob(theta,Rp,esd,err,z):
+def lnprob(theta,Rp,esd,esdtwo,err,z):
   lp = lnprior(theta)
   if not np.isfinite(lp):
         return -np.inf
-  return lp+lnlike(theta,Rp,esd,err,z)
+  return lp+lnlike(theta,Rp,esd,esdtwo,err,z)
 #---END of functions----------------
 #---PART IV: MAIN function---------
 def main():
@@ -179,92 +171,45 @@ def main():
    (o,args)   = parser.parse_args()
    cosmology  = [100,0.022,0.122]
 
-   redshift = 0.0789
-   data     = np.loadtxt('shear_richa_mean',unpack=True) 
-   covar    = np.loadtxt('covara',unpack=True) 
-   std      = np.loadtxt('stdricha',unpack=True) 
+   redshift = 0.1
+   data     = np.loadtxt('shear_c4_richd_mean',unpack=True) 
+   covar    = np.loadtxt('covar_c4_richd',unpack=True) 
+   std      = np.loadtxt('std_c4_richd',unpack=True) 
    covar[0,0]= covar[0,0]+std[0]*std[0]
    covar[1,1]= covar[1,1]+std[1]*std[1]
    covar[2,2]= covar[2,2]+std[2]*std[2]
    covar[3,3]= covar[3,3]+std[3]*std[3]
-   covar[4,4]= covar[4,4]+std[4]*std[4]
-   correl    = np.zeros((5,5))
-   for i in range(5):
-	   for j in range(5):
-               correl[i,j]=covar[i,j]/np.sqrt(covar[i,i])/np.sqrt(covar[j,j])
-   plt.imshow(correl,interpolation='nearest')
-   plt.colorbar()
-   plt.show()
    Rp       = data[0,:]
    esd      = data[1,:]
    err      = data[2,:]
 
    if o.MODE=='HARD':
-      results  = matterpower(redshift,cosmology)
-      kh       = results["kh"]
-      lpower   = results["nonpw"]
-      rr       = np.linspace(0.001,100,500)
-      xi       = ps2xi(kh,lpower[1,:],rr)
-      #onehesd  = nfwesd(14.0,4,0.1,Rp)
-      for i in range(len(rr)):
-	      print rr[i],xi[i]
-      #twohesd  = twohaloesd(Mh,rr,xi,Rp)
-
+      results = matterps2corr2esd(redshift,cosmology)
+      RR      = results['Rp']
+      ESDR    = results['ESD']
+      esdtwo  = np.interp(Rp,RR,ESDR)
    if o.MODE=='EASY':
-      data= np.loadtxt('corr_linear',unpack=True,skiprows=2)
+      data= np.loadtxt('corrs',unpack=True,skiprows=2)
       RR   = data[0,:]
       ESDR = data[1,:]
-      ESDRR= data[2,:]
-      logM = 14.0
-      con  = 4.0
-      zl   = 0.0789
-      pars = np.array([logM,con])
+      esdtwo= np.interp(Rp,RR,ESDR)
 
-      ndim,nwalkers = 2,200
-      pos = [pars+1e-4*np.random.randn(ndim) for i in range(nwalkers)]
-      sampler = emcee.EnsembleSampler(nwalkers,ndim,lnprob,args=(Rp,esd,covar,zl))
-      sampler.run_mcmc(pos,2000)
+   logM = 14.0
+   con  = 4.0
+   zl   = 0.1562
+   pars = np.array([logM,con])
 
-      burnin = 100
-      samples=sampler.chain[:,burnin:,:].reshape((-1,ndim))
-      Mh,cn= map(lambda v: (v[1],v[2]-v[1],v[1]-v[0]),zip(*np.percentile(samples,[16,50,84],axis=0)))
-      print 'Halo Mass:    ',Mh
-      print 'concentration:',cn
-      fig = corner.corner(samples,labels=["logM","c"],\
-          truths=[Mh[0],cn[0]],color="b",\
-	  plot_datapoints=False,plot_density=True)
-      plt.savefig('mcmc_richd.eps')
-      plt.show()
+   ndim,nwalkers = 2,200
+   pos = [pars+1e-4*np.random.randn(ndim) for i in range(nwalkers)]
+   sampler = emcee.EnsembleSampler(nwalkers,ndim,lnprob,args=(Rp,esd,esdtwo,covar,zl))
+   sampler.run_mcmc(pos,2000)
 
-      #finterp3 = interp1d(RR,ESDR)
-      #finterp4 = interp1d(RR,ESDRR)
-      #esdfunc3 = np.array(finterp3(Rp[3:5]))
-      #esdfunc4 = np.array(finterp4(Rp[3:5]))
-      """onehesd  = nfwesd([Mh[0],cn[0]],0.07,Rp)
-      plt.errorbar(Rp,esd,yerr=err,fmt='k.',ms=20,elinewidth=3)
-      plt.plot(Rp,onehesd,'k-',linewidth=3)
-      plt.xlabel('Rp')
-      plt.ylabel('esd')
-      plt.ylim(1.,600.)
-      plt.xlim(0.05,4.)
-      plt.yscale('log')
-      plt.xscale('log')
-      plt.show()"""
-      #bias     = galaxybias(15.5)
-      #twohesd  = np.zeros(len(esd))
-      #twohesd[3:5] = omega_m*h*(esdfunc4-esdfunc3)
-#   print bias           
-#   plt.errorbar(Rp,esd,yerr=err,fmt='k.',ms=10,elinewidth=3)
-#   plt.plot(Rp,onehesd,'k-.',linewidth=3)
-#   plt.plot(Rp,bias*twohesd,'k--',linewidth=3)
-#   plt.plot(Rp,onehesd+bias*twohesd,'k-',linewidth=3)
-#   plt.xlabel('Rp')
-#   plt.ylabel('esd')
-#   plt.ylim(5.,1000.)
-#   plt.xlim(0.05,4.)
-#   plt.yscale('log')
-#   plt.xscale('log')
-#   plt.show()
+   burnin = 200
+   samples=sampler.chain[:,burnin:,:].reshape((-1,ndim))
+   Mh,cn= map(lambda v: (v[1],v[2]-v[1],v[1]-v[0]),zip(*np.percentile(samples,[16,50,84],axis=0)))
+   print 'Halo Mass:    ',Mh
+   print 'concentration:',cn
+   print galaxybias(Mh[0])
 
 if __name__=='__main__':
    main()
